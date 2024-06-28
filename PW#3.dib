@@ -32,6 +32,7 @@
 
 #!csharp
 
+using System.Threading;
 //
 // Вычисление определенного интеграла
 //
@@ -46,7 +47,44 @@ class DefiniteIntegral
     public static double Solve(double a, double b, Func<double, double> function, double step, int threadsnumber)
     {
         // отсюда надо начинать реализацию задачи
-        return 0.0;
+        double solution = 0.0;
+        double segmentLength = (b - a) / threadsnumber;
+        Barrier barrier = new Barrier(threadsnumber);
+
+        void Task(int threadIndex)
+        {
+            double start = a + threadIndex * segmentLength;
+            
+            double end;
+            if (threadIndex == threadsnumber - 1) end = b;
+            else end = start + segmentLength;
+            double localSolution = 0.0;
+
+            for (double x = start; x < end; x += step)
+            {
+                double stepX = Math.Min(x + step, end);
+                localSolution += (function(x) + function(stepX)) / 2.0 * (stepX - x);
+            }
+
+            solution += localSolution;
+
+            barrier.SignalAndWait();
+        }
+
+        Thread[] threads = new Thread[threadsnumber];
+        for (int i = 0; i < threadsnumber; i++)
+        {
+            int threadNum = i;
+            threads[i] = new Thread(() => Task(threadNum));
+            threads[i].Start();
+        }
+
+        for (int i = 0; i < threadsnumber; i++)
+        {
+            threads[i].Join();
+        }
+
+        return solution;
     }
 }
 
@@ -63,4 +101,4 @@ Assert.Equal(0, DefiniteIntegral.Solve(-1, 1, X, 1e-4, 2), 1e-4);
 
 Assert.Equal(0, DefiniteIntegral.Solve(-1, 1, SIN, 1e-5, 8), 1e-4);
 
-Assert.Equal(10, DefiniteIntegral.Solve(0, 10, X, 1e-6, 8), 1e-5);
+Assert.Equal(50, DefiniteIntegral.Solve(0, 10, X, 1e-6, 8), 1e-5);
