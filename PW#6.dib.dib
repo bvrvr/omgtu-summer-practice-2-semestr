@@ -84,9 +84,9 @@ using System.Diagnostics;
     {
         startEvent.WaitOne();
         stopwatchEnqueue.Start();
-        for (int i = 0; i < messageCount; i++) 
+        for (int i = 0; i < messageCount; i++)
         {
-            collection.Add(new Message()); 
+            collection.Add(new Message());
         }
         stopwatchEnqueue.Stop();
         collection.CompleteAdding();
@@ -134,9 +134,9 @@ using System.Diagnostics;
     {
         startEvent.WaitOne();
         stopwatchEnqueue.Start();
-        for (int i = 0; i < messageCount; i++) 
+        for (int i = 0; i < messageCount; i++)
         {
-            queue.Enqueue(new Message()); 
+            queue.Enqueue(new Message());
         }
         stopwatchEnqueue.Stop();
         producingCompleted = true;
@@ -186,7 +186,7 @@ using System.Diagnostics;
     {
         startEvent.WaitOne();
         stopwatchEnqueue.Start();
-        for (int i = 0; i < messageCount; i++) 
+        for (int i = 0; i < messageCount; i++)
         {
             lock (queue)
             {
@@ -268,8 +268,9 @@ using System.Diagnostics;
 
 #r "nuget: ScottPlot, 5.0.36"
 using ScottPlot;
+using Microsoft.DotNet.Interactive.Formatting;
 
-Formatter.Register(typeof(ScottPlot.Plot), (p, w) => 
+Formatter.Register(typeof(ScottPlot.Plot), (p, w) =>
     w.Write(((ScottPlot.Plot)p).GetImageHtml(1200, 400)), HtmlFormatter.MimeType);
 
 ScottPlot.Plot plot = new();
