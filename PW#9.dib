@@ -20,22 +20,281 @@
 
 #!csharp
 
-interface ICommand
+public interface ICommand
 {
     void Execute();
+    bool IsComplete { get; }
 }
 
-
-public class TestCommand(int id) : ICommand
+public class TestCommand : ICommand
 {
-    int counter = 0;
+    private int counter = 0;
+    private int id;
+    private int maxExecutions;
+
+    public TestCommand(int id, int maxExecutions = 3)
+    {
+        this.id = id;
+        this.maxExecutions = maxExecutions;
+    }
 
     public void Execute()
     {
         Console.WriteLine($"Поток {id} вызов {++counter}");
     }
+
+    public bool IsComplete => counter >= maxExecutions;
 }
 
 #!markdown
 
 Необходимо проиллюстрировать выполнение 5 экземпляров TestCommand 3 раза, затем остановить поток с помощью HardStop.
+
+#!csharp
+
+public interface IScheduler
+{
+    bool HasCommand();
+    ICommand Select();
+    void Add(ICommand cmd);
+}
+
+#!csharp
+
+using System.Collections.Concurrent;
+
+public class CombinedScheduler : IScheduler
+{
+    private bool useRoundRobin;
+    private bool isThreadSafe;
+    private Queue<ICommand> scheduledCommands;
+    private ConcurrentQueue<ICommand> commandQueue;
+
+    public CombinedScheduler(bool useRoundRobin = false, bool isThreadSafe = false)
+    {
+        this.useRoundRobin = useRoundRobin;
+        this.isThreadSafe = isThreadSafe;
+        if (isThreadSafe)
+        {
+            commandQueue = new ConcurrentQueue<ICommand>();
+        }
+        else
+        {
+            scheduledCommands = new Queue<ICommand>();
+        }
+    }
+
+    public bool HasCommand()
+    {
+        if (isThreadSafe)
+        {
+            return !commandQueue.IsEmpty;
+        }
+        else
+        {
+            return scheduledCommands.Count > 0;
+        }
+    }
+
+    public ICommand Select()
+    {
+        if (isThreadSafe)
+        {
+            if (commandQueue.TryDequeue(out ICommand command))
+            {
+                return command;
+            }
+            return null;
+        }
+        else
+        {
+            if (scheduledCommands.Count == 0)
+            {
+                throw new InvalidOperationException("Нет доступных команд.");
+            }
+
+            var cmd = scheduledCommands.Dequeue();
+            if (useRoundRobin && !cmd.IsComplete)
+            {
+                scheduledCommands.Enqueue(cmd);
+            }
+            return cmd;
+        }
+    }
+
+    public void Add(ICommand cmd)
+    {
+        if (isThreadSafe)
+        {
+            commandQueue.Enqueue(cmd);
+        }
+        else
+        {
+            scheduledCommands.Enqueue(cmd);
+        }
+    }
+}
+
+#!csharp
+
+using System.Threading;
+
+public class ServerThread
+{
+    private IScheduler scheduler;
+    private Thread thread;
+    private bool isRunning;
+    private bool softStopRequested;
+    public int ThreadId { get; private set; }
+
+    public ServerThread(IScheduler scheduler)
+    {
+        this.scheduler = scheduler;
+        thread = new Thread(Run) { IsBackground = true };
+        isRunning = true;
+    }
+
+    public void Start()
+    {
+        thread.Start();
+    }
+
+    public void Stop()
+    {
+        isRunning = false;
+        thread.Join();
+    }
+
+    public void EnqueueCommand(ICommand command)
+    {
+        if (isRunning)
+        {
+            scheduler.Add(command);
+        }
+    }
+
+    public void RequestSoftStop()
+    {
+        softStopRequested = true;
+    }
+
+    private void Run()
+    {
+        ThreadId = Thread.CurrentThread.ManagedThreadId;
+        while (isRunning)
+        {
+            if (scheduler.HasCommand())
+            {
+                try
+                {
+                    var nextCommand = scheduler.Select();
+                    nextCommand?.Execute();
+
+                    if (nextCommand != null && !nextCommand.IsComplete)
+                    {
+                        scheduler.Add(nextCommand);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Исключение: {ex.Message}");
+                }
+            }
+            else
+            {
+                Thread.Sleep(10);
+            }
+
+            if (softStopRequested && !scheduler.HasCommand())
+            {
+                isRunning = false;
+            }
+        }
+    }
+
+    public bool IsRunning => isRunning;
+}
+
+#!csharp
+
+public class HardStopCommand : ICommand
+{
+    private ServerThread serverThread;
+
+    public HardStopCommand(ServerThread serverThread)
+    {
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread.ManagedThreadId != serverThread.ThreadId)
+            throw new InvalidOperationException("HardStop может выполняться только в потоке, который она останавливает.");
+
+        serverThread.Stop();
+        Console.WriteLine("Немедленная остановка выполнена.");
+    }
+
+    public bool IsComplete => true;
+}
+
+public class SoftStopCommand : ICommand
+{
+    private ServerThread serverThread;
+
+    public SoftStopCommand(ServerThread serverThread)
+    {
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread.ManagedThreadId != serverThread.ThreadId)
+            throw new InvalidOperationException("SoftStop может выполняться только в потоке, который она останавливает.");
+
+        serverThread.RequestSoftStop();
+        Console.WriteLine("Поток остановлен, так как в очереди потока закончились все Команды.");
+    }
+
+    public bool IsComplete => true;
+}
+
+public class BasicCommand : ICommand
+{
+    private string message;
+
+    public BasicCommand(string message)
+    {
+        this.message = message;
+    }
+
+    public void Execute()
+    {
+        Console.WriteLine(message);
+    }
+
+    public bool IsComplete => true;
+}
+
+#!csharp
+
+bool useRoundRobin = true;
+
+IScheduler scheduler = useRoundRobin ? new CombinedScheduler(useRoundRobin: true) : new CombinedScheduler();
+ServerThread serverThread = new ServerThread(scheduler);
+serverThread.Start();
+
+for (int i = 0; i < 5; i++)
+{
+    serverThread.EnqueueCommand(new TestCommand(i + 1));
+}
+
+while (scheduler.HasCommand())
+{
+    Thread.Sleep(10);
+}
+
+serverThread.EnqueueCommand(new HardStopCommand(serverThread));
+
+Thread.Sleep(500);
+Console.WriteLine("Все операции завершены.");
