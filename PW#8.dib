@@ -35,9 +35,14 @@
 
 #!csharp
 
+public interface ICommand
+{
+    void Execute();
+}
+
 public interface IScheduler
 {
-    bool HasCommand()
+    bool HasCommand();
     ICommand Select();
     void Add(ICommand cmd);
 }
@@ -55,3 +60,231 @@ public interface IScheduler
 Необходимо учесть этот момент при реализации очереди.
 
 2. Для обепечения справедливости стратегии планировщика в слабом смысле использовать стратегию Round Robbin (циклическую) для определения следующего потока на исполнение.
+
+#!csharp
+
+using System.Collections.Concurrent;
+using System.Threading;
+
+public class CombinedScheduler : IScheduler
+{
+    private bool useRoundRobin;
+    private bool isThreadSafe;
+    private Queue<ICommand> scheduledCommands;
+    private ConcurrentQueue<ICommand> commandQueue;
+
+    public CombinedScheduler(bool useRoundRobin = false, bool isThreadSafe = false)
+    {
+        this.useRoundRobin = useRoundRobin;
+        this.isThreadSafe = isThreadSafe;
+        if (isThreadSafe)
+        {
+            commandQueue = new ConcurrentQueue<ICommand>();
+        }
+        else
+        {
+            scheduledCommands = new Queue<ICommand>();
+        }
+    }
+
+    public bool HasCommand()
+    {
+        if (isThreadSafe)
+        {
+            return !commandQueue.IsEmpty;
+        }
+        else
+        {
+            return scheduledCommands.Count > 0;
+        }
+    }
+
+    public ICommand Select()
+    {
+        if (isThreadSafe)
+        {
+            if (commandQueue.TryDequeue(out ICommand command))
+            {
+                return command;
+            }
+            return null;
+        }
+        else
+        {
+            if (scheduledCommands.Count == 0)
+            {
+                throw new InvalidOperationException("Нет доступных команд.");
+            }
+
+            var cmd = scheduledCommands.Dequeue();
+            if (useRoundRobin)
+            {
+                scheduledCommands.Enqueue(cmd);
+            }
+            return cmd;
+        }
+    }
+
+    public void Add(ICommand cmd)
+    {
+        if (isThreadSafe)
+        {
+            commandQueue.Enqueue(cmd);
+        }
+        else
+        {
+            scheduledCommands.Enqueue(cmd);
+        }
+    }
+}
+
+#!csharp
+
+public class ServerThread
+{
+    private readonly IScheduler scheduler;
+    private readonly Thread thread;
+    private volatile bool isRunning;
+    private volatile bool softStopRequested;
+    public int ThreadId { get; private set; }
+
+    public ServerThread(IScheduler scheduler)
+    {
+        this.scheduler = scheduler;
+        thread = new Thread(Run) { IsBackground = true };
+        isRunning = true;
+    }
+
+    public void Start()
+    {
+        thread.Start();
+    }
+
+    public void Stop()
+    {
+        isRunning = false;
+        thread.Join();
+    }
+
+    public void EnqueueCommand(ICommand command)
+    {
+        if (isRunning)
+        {
+            scheduler.Add(command);
+        }
+    }
+
+    public void RequestSoftStop()
+    {
+        softStopRequested = true;
+    }
+
+    private void Run()
+    {
+        ThreadId = Thread.CurrentThread.ManagedThreadId;
+        while (isRunning)
+        {
+            if (scheduler.HasCommand())
+            {
+                try
+                {
+                    var nextCommand = scheduler.Select();
+                    nextCommand?.Execute();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Исключение: {ex.Message}");
+                }
+            }
+            else
+            {
+                Thread.Sleep(10);
+            }
+
+            if (softStopRequested && !scheduler.HasCommand())
+            {
+                isRunning = false;
+            }
+        }
+    }
+
+    public bool IsRunning => isRunning;
+}
+
+#!csharp
+
+public class HardStopCommand : ICommand
+{
+    private readonly ServerThread serverThread;
+
+    public HardStopCommand(ServerThread serverThread)
+    {
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread.ManagedThreadId != serverThread.ThreadId)
+            throw new InvalidOperationException("HardStop может выполняться только в потоке, который она останавливает.");
+
+        serverThread.Stop();
+        Console.WriteLine("Немедленная остановка выполнена.");
+    }
+}
+
+public class SoftStopCommand : ICommand
+{
+    private readonly ServerThread serverThread;
+
+    public SoftStopCommand(ServerThread serverThread)
+    {
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread.ManagedThreadId != serverThread.ThreadId)
+            throw new InvalidOperationException("SoftStop может выполняться только в потоке, который она останавливает.");
+
+        serverThread.RequestSoftStop();
+        Console.WriteLine("Поток остановлен, так как в очереди потока закончились все Команды.");
+    }
+}
+
+public class BasicCommand : ICommand
+{
+    private readonly string message;
+
+    public BasicCommand(string message)
+    {
+        this.message = message;
+    }
+
+    public void Execute()
+    {
+        Console.WriteLine(message);
+    }
+}
+
+#!csharp
+
+bool useRoundRobin = true;
+
+IScheduler scheduler = useRoundRobin ? new CombinedScheduler(useRoundRobin: true) : new CombinedScheduler();
+ServerThread serverThread = new ServerThread(scheduler);
+serverThread.Start();
+
+for (int i = 0; i < 3; i++)
+{
+    serverThread.EnqueueCommand(new BasicCommand($"Выполнение команды {i + 1}"));
+}
+
+serverThread.EnqueueCommand(new SoftStopCommand(serverThread));
+serverThread.EnqueueCommand(new BasicCommand("Добавление команд после запроса мягкой остановки..."));
+
+Thread.Sleep(10);
+Console.WriteLine("Выполнение немедленной остановки...");
+serverThread.EnqueueCommand(new HardStopCommand(serverThread));
+
+Thread.Sleep(10);
+Console.WriteLine("Все операции завершены.");
