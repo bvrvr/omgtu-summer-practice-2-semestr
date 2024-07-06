@@ -37,10 +37,255 @@
 Для этого следует использовать условные события, которые позволят убедиться, что оба потока запустились и готовы читать и писать объекты и только потом запускать таймер.
 2. Для итогового вывода сравнивать усредненные значения.
 
-#!markdown
+#!csharp
 
 // здесь писать код
+#r "nuget: xunit, 2.8.1"
+using System.Threading;
+using Xunit;
+
+class Message
+{
+    static int messageHandled = 0;
+    int id;
+
+    public Message()
+    {
+        id = Thread.CurrentThread.ManagedThreadId;
+    }
+
+    public void Handle()
+    {
+        Interlocked.Increment(ref messageHandled);
+        Assert.NotEqual(id, Thread.CurrentThread.ManagedThreadId);
+    }
+
+    public static void Check(int expectedCount)
+    {
+        Assert.Equal(expectedCount, messageHandled);
+    }
+}
+
+#!csharp
+
+using System.Collections.Concurrent;
+using System.Diagnostics;
+
+(int totalTime, int enqueueTime, int dequeueTime) TestBlockingCollection()
+{
+    var collection = new BlockingCollection<Message>(2);
+    var startEvent = new ManualResetEvent(false);
+    var stopwatchTotal = new Stopwatch();
+    var stopwatchEnqueue = new Stopwatch();
+    var stopwatchDequeue = new Stopwatch();
+    int messageCount = 1000000;
+
+    Thread producer = new Thread(() =>
+    {
+        startEvent.WaitOne();
+        stopwatchEnqueue.Start();
+        for (int i = 0; i < messageCount; i++)
+        {
+            collection.Add(new Message());
+        }
+        stopwatchEnqueue.Stop();
+        collection.CompleteAdding();
+    });
+
+    Thread consumer = new Thread(() =>
+    {
+        startEvent.WaitOne();
+        stopwatchDequeue.Start();
+        while (!collection.IsCompleted)
+        {
+            if (collection.TryTake(out var message))
+            {
+                message.Handle();
+            }
+        }
+        stopwatchDequeue.Stop();
+    });
+
+    producer.Start();
+    consumer.Start();
+    startEvent.Set();
+    stopwatchTotal.Start();
+
+    producer.Join();
+    consumer.Join();
+    stopwatchTotal.Stop();
+
+    Console.WriteLine($"BlockingCollection: Total Time = {stopwatchTotal.ElapsedMilliseconds} ms, Enqueue Time = {stopwatchEnqueue.ElapsedMilliseconds} ms, Dequeue Time = {stopwatchDequeue.ElapsedMilliseconds} ms");
+
+    return ((int)stopwatchTotal.ElapsedMilliseconds, (int)stopwatchEnqueue.ElapsedMilliseconds, (int)stopwatchDequeue.ElapsedMilliseconds);
+}
+
+(int totalTime, int enqueueTime, int dequeueTime) TestConcurrentQueue()
+{
+    var queue = new ConcurrentQueue<Message>();
+    var startEvent = new ManualResetEvent(false);
+    var stopwatchTotal = new Stopwatch();
+    var stopwatchEnqueue = new Stopwatch();
+    var stopwatchDequeue = new Stopwatch();
+    int messageCount = 1000000;
+    bool producingCompleted = false;
+
+    Thread producer = new Thread(() =>
+    {
+        startEvent.WaitOne();
+        stopwatchEnqueue.Start();
+        for (int i = 0; i < messageCount; i++)
+        {
+            queue.Enqueue(new Message());
+        }
+        stopwatchEnqueue.Stop();
+        producingCompleted = true;
+    });
+
+    Thread consumer = new Thread(() =>
+    {
+        startEvent.WaitOne();
+        stopwatchDequeue.Start();
+        int consumedCount = 0;
+        while (consumedCount < messageCount || !producingCompleted)
+        {
+            if (queue.TryDequeue(out var message))
+            {
+                message.Handle();
+                consumedCount++;
+            }
+        }
+        stopwatchDequeue.Stop();
+    });
+
+    producer.Start();
+    consumer.Start();
+    startEvent.Set();
+    stopwatchTotal.Start();
+
+    producer.Join();
+    consumer.Join();
+    stopwatchTotal.Stop();
+
+    Console.WriteLine($"ConcurrentQueue: Total Time = {stopwatchTotal.ElapsedMilliseconds} ms, Enqueue Time = {stopwatchEnqueue.ElapsedMilliseconds} ms, Dequeue Time = {stopwatchDequeue.ElapsedMilliseconds} ms");
+
+    return ((int)stopwatchTotal.ElapsedMilliseconds, (int)stopwatchEnqueue.ElapsedMilliseconds, (int)stopwatchDequeue.ElapsedMilliseconds);
+}
+
+(int totalTime, int enqueueTime, int dequeueTime) TestQueue()
+{
+    var queue = new Queue<Message>();
+    var startEvent = new ManualResetEvent(false);
+    var stopwatchTotal = new Stopwatch();
+    var stopwatchEnqueue = new Stopwatch();
+    var stopwatchDequeue = new Stopwatch();
+    int messageCount = 1000000;
+    bool producingCompleted = false;
+
+    Thread producer = new Thread(() =>
+    {
+        startEvent.WaitOne();
+        stopwatchEnqueue.Start();
+        for (int i = 0; i < messageCount; i++)
+        {
+            lock (queue)
+            {
+                queue.Enqueue(new Message());
+                Monitor.Pulse(queue);
+            }
+        }
+        stopwatchEnqueue.Stop();
+        lock (queue)
+        {
+            producingCompleted = true;
+            Monitor.PulseAll(queue);
+        }
+    });
+
+    Thread consumer = new Thread(() =>
+    {
+        startEvent.WaitOne();
+        stopwatchDequeue.Start();
+        while (true)
+        {
+            Message message = null;
+            lock (queue)
+            {
+                while (queue.Count == 0 && !producingCompleted)
+                {
+                    Monitor.Wait(queue);
+                }
+                if (queue.Count > 0)
+                {
+                    message = queue.Dequeue();
+                }
+                else if (producingCompleted)
+                {
+                    break;
+                }
+            }
+            message?.Handle();
+        }
+        stopwatchDequeue.Stop();
+    });
+
+    producer.Start();
+    consumer.Start();
+    startEvent.Set();
+    stopwatchTotal.Start();
+
+    producer.Join();
+    consumer.Join();
+    stopwatchTotal.Stop();
+
+    Console.WriteLine($"Queue: Total Time = {stopwatchTotal.ElapsedMilliseconds} ms, Enqueue Time = {stopwatchEnqueue.ElapsedMilliseconds} ms, Dequeue Time = {stopwatchDequeue.ElapsedMilliseconds} ms");
+
+    return ((int)stopwatchTotal.ElapsedMilliseconds, (int)stopwatchEnqueue.ElapsedMilliseconds, (int)stopwatchDequeue.ElapsedMilliseconds);
+}
+
+#!csharp
+
+(int[], int[]) CollectResults(Func<(int, int, int)> testMethod, int iterations)
+{
+    int[] totalTimes = new int[iterations];
+    int[] iterationNumbers = new int[iterations];
+    for (int i = 1; i < iterations + 1; i++)
+    {
+        (int totalTime, int enqueueTime, int dequeueTime) = testMethod();
+        totalTimes[i - 1] = totalTime;
+        iterationNumbers[i - 1] = i;
+    }
+    return (iterationNumbers, totalTimes);
+}
+
+(int[] blockingCollectionIterations, int[] blockingCollectionTimes) = CollectResults(TestBlockingCollection, 10);
+
+(int[] concurrentQueueIterations, int[] concurrentQueueTimes) = CollectResults(TestConcurrentQueue, 10);
+
+(int[] queueIterations, int[] queueTimes) = CollectResults(TestQueue, 10);
+
+#!csharp
+
+#r "nuget: ScottPlot, 5.0.36"
+using ScottPlot;
+using Microsoft.DotNet.Interactive.Formatting;
+
+Formatter.Register(typeof(ScottPlot.Plot), (p, w) =>
+    w.Write(((ScottPlot.Plot)p).GetImageHtml(1200, 400)), HtmlFormatter.MimeType);
+
+ScottPlot.Plot plot = new();
+plot.Add.Scatter(blockingCollectionIterations, blockingCollectionTimes);
+plot.Add.Scatter(concurrentQueueIterations, concurrentQueueTimes);
+plot.Add.Scatter(queueIterations, queueTimes);
+
+Console.WriteLine($"BlockingCollection: {blockingCollectionTimes.Average()} ms\nConcurrentQueue: {concurrentQueueTimes.Average()} ms\nНепотокобезопасные: {queueTimes.Average()} ms");
+
+plot
 
 #!markdown
 
 ## Вывод
+
+Наиболее эффективной потоко-безопасной коллекцией оказалась ConcurrentQueue. Она эффективней BlockingCollection на ~85%.
+
+Если сравнивать ConcurrentQueue и обычную очередь, то ConcurrentQueue эффективней на ~59%.
