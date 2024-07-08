@@ -36,3 +36,392 @@
 1. [Паттерн Сообщение](https://www.enterpriseintegrationpatterns.com/patterns/messaging/Message.html)
 2. [Паттерн Роутер - весь раздел про Роутеры](https://www.enterpriseintegrationpatterns.com/patterns/messaging/MessageRoutingIntro.html)
 3. [Обмен сообщеними](https://www.enterpriseintegrationpatterns.com/patterns/messaging/MessageConstructionIntro.html)
+
+#!csharp
+
+public interface ICommand
+{
+    void Execute();
+    bool IsComplete { get; }
+}
+
+public class Message
+{
+    public int CommandId { get; }
+    public string Data { get; }
+
+    public Message(int commandId, string data)
+    {
+        CommandId = commandId;
+        Data = data;
+    }
+}
+
+#!csharp
+
+public abstract class LongRunningCommand : ICommand
+{
+    public Queue<Message> messageQueue = new Queue<Message>();
+    public int executionCount = 0;
+
+    public int Id { get; }
+    public int MaxExecutions { get; }
+
+    public LongRunningCommand(int id, int maxExecutions = 3)
+    {
+        Id = id;
+        MaxExecutions = maxExecutions;
+    }
+
+    public void AddMessage(Message message)
+    {
+        messageQueue.Enqueue(message);
+    }
+
+    public void Execute()
+    {
+        if (messageQueue.Count > 0)
+        {
+            var message = messageQueue.Dequeue();
+            ProcessMessage(message);
+        }
+        else
+        {
+            Console.WriteLine($"Поток {Id} вызов {++executionCount}");
+        }
+    }
+
+    protected abstract void ProcessMessage(Message message);
+
+    public bool IsComplete => executionCount >= MaxExecutions;
+}
+
+public class TestLongRunningCommand : LongRunningCommand
+{
+    public TestLongRunningCommand(int id, int maxExecutions = 3) : base(id, maxExecutions) { }
+
+    protected override void ProcessMessage(Message message)
+    {
+        Console.WriteLine($"Команда {Id} обработала сообщение: {message.Data}");
+    }
+}
+
+#!csharp
+
+using System.Collections.Concurrent;
+
+public class RouterCommand : ICommand
+{
+    public ConcurrentQueue<Message> routerQueue;
+    public Dictionary<int, LongRunningCommand> commandMap;
+
+    public RouterCommand()
+    {
+        routerQueue = new ConcurrentQueue<Message>();
+        commandMap = new Dictionary<int, LongRunningCommand>();
+    }
+
+    public void AddCommand(LongRunningCommand command)
+    {
+        commandMap[command.Id] = command;
+    }
+
+    public void RemoveCommand(int commandId)
+    {
+        if (commandMap.ContainsKey(commandId))
+        {
+            commandMap.Remove(commandId);
+        }
+    }
+
+    public void EnqueueMessage(Message message)
+    {
+        routerQueue.Enqueue(message);
+    }
+
+    public void Execute()
+    {
+        if (routerQueue.TryDequeue(out var message))
+        {
+            if (commandMap.TryGetValue(message.CommandId, out var command))
+            {
+                command.AddMessage(message);
+            }
+            else
+            {
+                Console.WriteLine($"Сообщение не может быть доставлено неизвестной команде с id {message.CommandId}");
+            }
+        }
+    }
+
+    public bool IsComplete => false; // Роутер никогда не завершает работу сам по себе
+}
+
+#!csharp
+
+public interface IScheduler
+{
+    bool HasCommand();
+    ICommand Select();
+    void Add(ICommand cmd);
+}
+
+public class CombinedScheduler : IScheduler
+{
+    public bool useRoundRobin;
+    public bool isThreadSafe;
+    public Queue<ICommand> scheduledCommands;
+    public ConcurrentQueue<ICommand> commandQueue;
+
+    public CombinedScheduler(bool useRoundRobin = false, bool isThreadSafe = false)
+    {
+        this.useRoundRobin = useRoundRobin;
+        this.isThreadSafe = isThreadSafe;
+        if (isThreadSafe)
+        {
+            commandQueue = new ConcurrentQueue<ICommand>();
+        }
+        else
+        {
+            scheduledCommands = new Queue<ICommand>();
+        }
+    }
+
+    public bool HasCommand()
+    {
+        if (isThreadSafe)
+        {
+            return !commandQueue.IsEmpty;
+        }
+        else
+        {
+            return scheduledCommands.Count > 0;
+        }
+    }
+
+    public ICommand Select()
+    {
+        if (isThreadSafe)
+        {
+            if (commandQueue.TryDequeue(out ICommand command))
+            {
+                return command;
+            }
+            return null;
+        }
+        else
+        {
+            if (scheduledCommands.Count == 0)
+            {
+                throw new InvalidOperationException("Нет доступных команд.");
+            }
+
+            var cmd = scheduledCommands.Dequeue();
+            if (useRoundRobin && !cmd.IsComplete)
+            {
+                scheduledCommands.Enqueue(cmd);
+            }
+            return cmd;
+        }
+    }
+
+    public void Add(ICommand cmd)
+    {
+        if (isThreadSafe)
+        {
+            commandQueue.Enqueue(cmd);
+        }
+        else
+        {
+            scheduledCommands.Enqueue(cmd);
+        }
+    }
+}
+
+#!csharp
+
+using System.Threading;
+
+public class ServerThread
+{
+    public IScheduler scheduler;
+    public Thread thread;
+    public bool isRunning;
+    public bool softStopRequested;
+    public int ThreadId { get; private set; }
+    public RouterCommand routerCommand;
+
+    public ServerThread(IScheduler scheduler)
+    {
+        this.scheduler = scheduler;
+        thread = new Thread(Run) { IsBackground = true };
+        isRunning = true;
+        routerCommand = new RouterCommand();
+        scheduler.Add(routerCommand);
+    }
+
+    public void Start()
+    {
+        thread.Start();
+    }
+
+    public void Stop()
+    {
+        isRunning = false;
+        thread.Join();
+    }
+
+    public void EnqueueCommand(ICommand command)
+    {
+        if (isRunning)
+        {
+            scheduler.Add(command);
+        }
+    }
+
+    public void AddLongRunningCommand(LongRunningCommand command)
+    {
+        routerCommand.AddCommand(command);
+        EnqueueCommand(command);
+    }
+
+    public void RemoveLongRunningCommand(int commandId)
+    {
+        routerCommand.RemoveCommand(commandId);
+    }
+
+    public void EnqueueMessage(Message message)
+    {
+        routerCommand.EnqueueMessage(message);
+    }
+
+    public void RequestSoftStop()
+    {
+        softStopRequested = true;
+    }
+
+    public void Run()
+    {
+        ThreadId = Thread.CurrentThread.ManagedThreadId;
+        while (isRunning)
+        {
+            if (scheduler.HasCommand())
+            {
+                try
+                {
+                    var nextCommand = scheduler.Select();
+                    nextCommand?.Execute();
+                    if (nextCommand != null && !nextCommand.IsComplete)
+                    {
+                        scheduler.Add(nextCommand);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Исключение: {ex.Message}");
+                }
+            }
+            else
+            {
+                Thread.Sleep(10);
+            }
+
+            if (softStopRequested && !scheduler.HasCommand())
+            {
+                isRunning = false;
+            }
+        }
+    }
+
+    public bool IsRunning => isRunning;
+}
+
+#!csharp
+
+public class HardStopCommand : ICommand
+{
+    public ServerThread serverThread;
+
+    public HardStopCommand(ServerThread serverThread)
+    {
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread.ManagedThreadId != serverThread.ThreadId)
+            throw new InvalidOperationException("HardStop может выполняться только в потоке, который она останавливает.");
+
+        serverThread.Stop();
+        Console.WriteLine("Немедленная остановка выполнена.");
+    }
+
+    public bool IsComplete => true;
+}
+
+public class SoftStopCommand : ICommand
+{
+    public ServerThread serverThread;
+
+    public SoftStopCommand(ServerThread serverThread)
+    {
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread.ManagedThreadId != serverThread.ThreadId)
+            throw new InvalidOperationException("SoftStop может выполняться только в потоке, который она останавливает.");
+
+        serverThread.RequestSoftStop();
+        Console.WriteLine("Поток остановлен, так как в очереди потока закончились все Команды.");
+    }
+
+    public bool IsComplete => true;
+}
+
+public class BasicCommand : ICommand
+{
+    public string message;
+
+    public BasicCommand(string message)
+    {
+        this.message = message;
+    }
+
+    public void Execute()
+    {
+        Console.WriteLine(message);
+    }
+
+    public bool IsComplete => true;
+}
+
+#!csharp
+
+bool useRoundRobin = true;
+
+IScheduler scheduler = useRoundRobin ? new CombinedScheduler(useRoundRobin: true) : new CombinedScheduler();
+ServerThread serverThread = new ServerThread(scheduler);
+serverThread.Start();
+
+LongRunningCommand command1 = new TestLongRunningCommand(1);
+LongRunningCommand command2 = new TestLongRunningCommand(2);
+
+serverThread.AddLongRunningCommand(command1);
+serverThread.AddLongRunningCommand(command2);
+
+serverThread.EnqueueMessage(new Message(1, "Сообщение для команды 1"));
+serverThread.EnqueueMessage(new Message(2, "Сообщение для команды 2"));
+serverThread.EnqueueMessage(new Message(3, "Сообщение для неизвестной команды"));
+
+Thread.Sleep(500);
+
+serverThread.EnqueueCommand(new HardStopCommand(serverThread));
+
+while (serverThread.IsRunning)
+{
+    Thread.Sleep(10);
+}
+
+Console.WriteLine("Все операции завершены.");
