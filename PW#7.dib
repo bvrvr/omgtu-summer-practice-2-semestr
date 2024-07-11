@@ -38,3 +38,139 @@ ServerThread может менять свое поведение для обра
 Отсутствие Команд в очереди потока не должно требовать значительных затрат процессорного времени. Значительными считаются затраты, которые зависят от времени простоя потока.
 
 Написать проверку, которая гарантирует правильное выполнение команд HardStop и SoftStop.
+
+#!csharp
+
+using System.Collections.Concurrent;
+using System.Threading;
+
+public class ServerThread
+{
+    private BlockingCollection<ICommand> commandQueue = new BlockingCollection<ICommand>();
+    private volatile bool hardStopRequested = false;
+    private volatile bool softStopRequested = false;
+    public int ThreadId { get; private set; }
+
+    public void Start()
+    {
+        Thread thread = new Thread(Run);
+        thread.Start();
+    }
+
+    private void Run()
+    {
+        ThreadId = Thread.CurrentThread.ManagedThreadId;
+        while (!hardStopRequested)
+        {
+            if (commandQueue.TryTake(out ICommand command))
+            {
+                try
+                {
+                    command.Execute();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Исключение: {ex.Message}");
+                }
+            }
+
+            if (softStopRequested && commandQueue.Count == 0)
+            {
+                break;
+            }
+        }
+    }
+
+    public void EnqueueCommand(ICommand command)
+    {
+        commandQueue.Add(command);
+    }
+
+    public void RequestSoftStop()
+    {
+        softStopRequested = true;
+    }
+
+    public void Stop()
+    {
+        hardStopRequested = true;
+    }
+}
+
+#!csharp
+
+public class HardStopCommand : ICommand
+{
+    private readonly ServerThread serverThread;
+
+    public HardStopCommand(ServerThread serverThread)
+    {
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread.ManagedThreadId != serverThread.ThreadId) 
+            throw new InvalidOperationException("HardStop может выполняться только в потоке, который она останавливает.");
+
+        serverThread.Stop();
+        Console.WriteLine("Немедленная остановка выполнена.");
+    }
+}
+
+public class SoftStopCommand : ICommand
+{
+    private readonly ServerThread serverThread;
+
+    public SoftStopCommand(ServerThread serverThread)
+    {
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread.ManagedThreadId != serverThread.ThreadId) 
+            throw new InvalidOperationException("SoftStop может выполняться только в потоке, который она останавливает");
+
+        serverThread.RequestSoftStop();
+        Console.WriteLine("Поток остановлен, так как в очереди потока закончились все Команды.");
+    }
+}
+
+public class BasicCommand : ICommand
+{
+    private readonly string message;
+
+    public BasicCommand(string message)
+    {
+        this.message = message;
+    }
+
+    public void Execute()
+    {
+        Console.WriteLine(message);
+    }
+}
+
+#!csharp
+
+ServerThread serverThread = new ServerThread();
+serverThread.Start();
+
+for (int i = 0; i < 5; i++)
+{
+    serverThread.EnqueueCommand(new BasicCommand($"Выполнение команды {i+1}"));
+}
+
+serverThread.EnqueueCommand(new SoftStopCommand(serverThread));
+
+serverThread.EnqueueCommand(new BasicCommand("Добавление команд после запроса мягкой остановки..."));
+
+Thread.Sleep(1000);
+
+Console.WriteLine("Выполнение немедленной остановки...");
+serverThread.EnqueueCommand(new HardStopCommand(serverThread));
+
+Thread.Sleep(1000);
+
+Console.WriteLine("Все операции завершены.");
